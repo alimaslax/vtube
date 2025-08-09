@@ -77,10 +77,13 @@ struct YouTubeWebView: UIViewRepresentable {
             
             let host = url.host?.lowercased() ?? ""
             
-            // Allow YouTube and essential domains
+            // Allow YouTube, Google authentication, and essential domains
             if host.contains("youtube.com") || host.contains("youtu.be") || 
                host.contains("ytimg.com") || host.contains("ggpht.com") ||
-               host.contains("googlevideo.com") || host.contains("gstatic.com") {
+               host.contains("googlevideo.com") || host.contains("gstatic.com") ||
+               host.contains("accounts.google.com") || host.contains("myaccount.google.com") ||
+               host.contains("signin.google.com") || host.contains("oauth.google.com") ||
+               host.contains("googleapis.com") || host.contains("google.com") {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)
