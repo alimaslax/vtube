@@ -15,54 +15,12 @@ struct ContentView: View {
     @State private var webView: WKWebView?
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Navigation toolbar
-            HStack {
-                Button(action: {
-                    webView?.goBack()
-                }) {
-                    Image(systemName: "chevron.left")
-                        .foregroundColor(canGoBack ? .blue : .gray)
-                }
-                .disabled(!canGoBack)
-                
-                Button(action: {
-                    webView?.goForward()
-                }) {
-                    Image(systemName: "chevron.right")
-                        .foregroundColor(canGoForward ? .blue : .gray)
-                }
-                .disabled(!canGoForward)
-                
-                Spacer()
-                
-                if isLoading {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                }
-                
-                Spacer()
-                
-                Button(action: {
-                    webView?.reload()
-                }) {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundColor(.blue)
-                }
-            }
-            .padding()
-            .background(Color(.systemGray6))
-            
-            // WebView
-            YouTubeWebView(
-                canGoBack: $canGoBack,
-                canGoForward: $canGoForward,
-                isLoading: $isLoading,
-                webView: $webView
-            )
-        }
-        .navigationTitle("VTube")
-        .navigationBarTitleDisplayMode(.inline)
+        YouTubeWebView(
+            canGoBack: $canGoBack,
+            canGoForward: $canGoForward,
+            isLoading: $isLoading,
+            webView: $webView
+        )
     }
 }
 
