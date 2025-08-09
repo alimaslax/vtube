@@ -7,12 +7,16 @@
 
 import SwiftUI
 import WebKit
+import AVFoundation
+import MediaPlayer
+import Combine
 
 struct ContentView: View {
     @State private var canGoBack = false
     @State private var canGoForward = false
     @State private var isLoading = false
     @State private var webView: WKWebView?
+    @State private var cancellables = Set<AnyCancellable>()
     
     var body: some View {
         YouTubeWebView(
@@ -21,6 +25,68 @@ struct ContentView: View {
             isLoading: $isLoading,
             webView: $webView
         )
+        .onAppear {
+            configureAudioSession()
+            setupRemoteControlHandlers()
+            setupAppLifecycleObservers()
+        }
+    }
+    
+    private func configureAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [
+                .allowAirPlay, 
+                .allowBluetooth, 
+                .allowBluetoothA2DP,
+                .mixWithOthers
+            ])
+            try audioSession.setActive(true)
+        } catch {
+            print("Failed to configure audio session: \(error)")
+        }
+    }
+    
+    private func setupRemoteControlHandlers() {
+        NotificationCenter.default.publisher(for: Notification.Name("RemotePlay"))
+            .sink { _ in
+                webView?.evaluateJavaScript("document.querySelector('video')?.play()")
+            }
+            .store(in: &cancellables)
+            
+        NotificationCenter.default.publisher(for: Notification.Name("RemotePause"))
+            .sink { _ in
+                webView?.evaluateJavaScript("document.querySelector('video')?.pause()")
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func setupAppLifecycleObservers() {
+        NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { _ in
+                // Keep audio session active when entering background
+                do {
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to maintain audio session in background: \(error)")
+                }
+                
+                // Ensure video continues playing in background
+                webView?.evaluateJavaScript("""
+                    const video = document.querySelector('video');
+                    if (video && !video.paused) {
+                        video.play().catch(() => {});
+                    }
+                """)
+            }
+            .store(in: &cancellables)
+            
+        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .sink { _ in
+                // Reconfigure audio session when returning to foreground
+                configureAudioSession()
+            }
+            .store(in: &cancellables)
     }
 }
 
@@ -35,12 +101,28 @@ struct YouTubeWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         
-        // Enable media playback
+        // Enable media playback and background audio
         config.allowsInlineMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        config.suppressesIncrementalRendering = false
+        
+        // Configure user content controller for better media handling
+        let userController = WKUserContentController()
+        config.userContentController = userController
+        
+        // Add preferences for better media support
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = true
+        config.defaultWebpagePreferences = preferences
         
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        webView.scrollView.bounces = true
+        webView.allowsBackForwardNavigationGestures = true
+        
+        // Important: Enable background processing
+        webView.configuration.processPool = WKProcessPool()
         
         // Store reference to webView
         DispatchQueue.main.async {
@@ -103,22 +185,120 @@ struct YouTubeWebView: UIViewRepresentable {
                 self.parent.canGoForward = webView.canGoForward
             }
             
-            // Simple ad skipping script
-            let adBlockScript = """
-                setInterval(function() {
-                    // Skip video ads
-                    const skipButton = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button');
-                    if (skipButton) {
-                        skipButton.click();
+            // Enhanced background playback and ad blocking script
+            let enhancementScript = """
+                (function() {
+                    let lastVideoElement = null;
+                    let wasPlayingBeforeHidden = false;
+                    
+                    // Function to find and setup video element
+                    function setupVideoElement() {
+                        const video = document.querySelector('video');
+                        if (video && video !== lastVideoElement) {
+                            lastVideoElement = video;
+                            
+                            // Remove existing listeners to avoid duplicates
+                            video.removeEventListener('pause', handlePause);
+                            video.removeEventListener('play', handlePlay);
+                            
+                            // Add event listeners
+                            video.addEventListener('pause', handlePause);
+                            video.addEventListener('play', handlePlay);
+                            
+                            // Ensure video can play in background
+                            video.setAttribute('playsinline', 'true');
+                            video.setAttribute('webkit-playsinline', 'true');
+                        }
+                        return video;
                     }
                     
-                    // Hide banner ads
-                    const bannerAds = document.querySelectorAll('.ytd-display-ad-renderer');
-                    bannerAds.forEach(ad => ad.style.display = 'none');
-                }, 1000);
+                    function handlePause(event) {
+                        // If page is hidden and video was paused, try to resume
+                        if (document.hidden && event.target.currentTime > 0) {
+                            setTimeout(() => {
+                                if (document.hidden && event.target.paused) {
+                                    event.target.play().catch(() => {});
+                                }
+                            }, 100);
+                        }
+                    }
+                    
+                    function handlePlay(event) {
+                        wasPlayingBeforeHidden = true;
+                    }
+                    
+                    // Handle visibility changes
+                    function handleVisibilityChange() {
+                        const video = document.querySelector('video');
+                        if (video) {
+                            if (document.hidden) {
+                                wasPlayingBeforeHidden = !video.paused;
+                                // Don't pause - let it continue playing
+                            } else {
+                                // Page became visible again
+                                if (wasPlayingBeforeHidden && video.paused) {
+                                    video.play().catch(() => {});
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Override YouTube's pause behavior for background
+                    const originalPause = HTMLMediaElement.prototype.pause;
+                    HTMLMediaElement.prototype.pause = function() {
+                        // Only allow pause if page is visible or user explicitly paused
+                        if (!document.hidden || this.dataset.userPaused === 'true') {
+                            originalPause.call(this);
+                        }
+                    };
+                    
+                    // Track user-initiated pauses
+                    document.addEventListener('click', function(e) {
+                        const video = document.querySelector('video');
+                        if (video && e.target.closest('.ytp-play-button')) {
+                            video.dataset.userPaused = video.paused ? 'false' : 'true';
+                        }
+                });
+                    
+                    // Main interval for ad blocking and video setup
+                    setInterval(function() {
+                        // Skip video ads
+                        const skipButton = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, [class*="skip"][class*="button"]');
+                        if (skipButton && skipButton.offsetParent !== null) {
+                            skipButton.click();
+                        }
+                        
+                        // Hide banner ads
+                        const bannerAds = document.querySelectorAll('.ytd-display-ad-renderer, .ytd-promoted-sparkles-web-renderer');
+                        bannerAds.forEach(ad => ad.style.display = 'none');
+                        
+                        // Setup video element if found
+                        setupVideoElement();
+                        
+                        // Ensure video continues in background
+                        const video = document.querySelector('video');
+                        if (video && document.hidden && video.paused && video.currentTime > 0 && video.dataset.userPaused !== 'true') {
+                            video.play().catch(() => {});
+                        }
+                    }, 1000);
+                    
+                    // Add visibility change listener
+                    document.addEventListener('visibilitychange', handleVisibilityChange);
+                    
+                    // Prevent YouTube from detecting background state
+                    Object.defineProperty(document, 'hidden', {
+                        get: function() { return false; },
+                        configurable: true
+                    });
+                    
+                    Object.defineProperty(document, 'visibilityState', {
+                        get: function() { return 'visible'; },
+                        configurable: true
+                    });
+                })();
             """
             
-            webView.evaluateJavaScript(adBlockScript, completionHandler: nil)
+            webView.evaluateJavaScript(enhancementScript, completionHandler: nil)
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
